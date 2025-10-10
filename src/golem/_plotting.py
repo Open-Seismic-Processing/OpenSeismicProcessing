@@ -177,7 +177,7 @@ def plot_seismic_image(context, xlabel, ylabel, y_spacing, x_header, perc=None,
 
             plt.tight_layout()
             # display_centered(plt.gcf())
-            # plt.show()
+            plt.show()
 
         elif data.ndim == 1:
             y = np.arange(len(data)) * y_spacing
@@ -195,7 +195,7 @@ def plot_seismic_image(context, xlabel, ylabel, y_spacing, x_header, perc=None,
 
             plt.tight_layout()
             # display_centered(plt.gcf())
-
+            plt.show()
         else:
             print(f"❌ Error: 'data' must be 1D or 2D. Got shape: {data.shape}")
 

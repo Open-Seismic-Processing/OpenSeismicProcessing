@@ -1,24 +1,55 @@
-from setuptools import setup, find_packages
-import sys
+from pathlib import Path
 
-if sys.version_info >= (3, 12):
-    raise RuntimeError("⚠️ golem is not compatible with Python 3.12+. Please use Python 3.11 or below.")
+from setuptools import find_packages, setup
+
+
+BASE_DIR = Path(__file__).parent.resolve()
+README_PATH = BASE_DIR / "README.md"
+
+if README_PATH.exists():
+    long_description = README_PATH.read_text(encoding="utf-8")
+else:
+    long_description = "Seismic processing utilities for data I/O, processing, and visualization workflows."
+
 
 setup(
-    name='golem',
-    version='0.1',
-    packages=find_packages(where='src'),
-    package_dir={'': 'src'},
-    python_requires='>=3.8, <=3.11',
+    name="golem",
+    version="0.1.0",
+    description="Seismic Processing Toolkit",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    author="Ammir Ayman Karsou",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
+    include_package_data=True,
+    package_data={"golem": ["lib/*.so"]},
+    python_requires=">=3.8,<3.12",
     install_requires=[
-        'numpy',
-        'pandas',
-        'matplotlib',
-        'scipy',
-        'opencv-python',
-        'pylops',
-        'numba'
+        "numpy",
+        "pandas",
+        "matplotlib",
+        "scipy",
+        "opencv-python",
+        "pylops",
+        "numba",
+        "segyio",
+        "ipython",
     ],
-    author='Ammir Ayman Karsou',
-    description='Seismic Processing Toolkit',
+    extras_require={
+        "gpu": [
+            "cupy>=12.0",
+            "nvidia-dali-cuda120; platform_system == 'Linux'",
+        ],
+    },
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Science/Research",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Topic :: Scientific/Engineering",
+    ],
+    keywords=["seismic", "processing", "geophysics"],
 )

@@ -418,36 +418,232 @@ void resample_field_into_npp_cubic(float* d_base,
 //  - traveltime_filename: path to the binary file with appended traveltime fields.
 //  - num_fields: number of traveltime fields in the file.
 
+template <typename T>
+T* allocateGpuMemory(size_t count) {
+    T* d_ptr = nullptr;
+    // Allocate memory on the device.
+    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_ptr), count * sizeof(T));
+    if (err != cudaSuccess) {
+        // Print error message and return nullptr in case of allocation error.
+        fprintf(stderr, "CUDA error in cudaMalloc for %zu elements of size %zu: %s\n",
+                count, sizeof(T), cudaGetErrorString(err));
+        return nullptr;
+    }
+    return d_ptr;
+}
+
+__device__ void copy_coarse_traveltimes_to_shared_memory(const float* __restrict__ globalData, float* sharedTile1, float* sharedTile2, int s0, int s1,
+    int tileDimX, int tileDimY, int gx, int gz, int nx, int nz, int ratio_x, int ratio_z)
+{
+
+    // The number of unique coarse samples to load is tileDimX * tileDimY.
+    int numElements = tileDimX * tileDimY;
+
+    // Compute a linear thread id within the block.
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int totalThreads = blockDim.x * blockDim.y;
+
+    // Loop over the unique indices in the tile with stride = totalThreads.
+    for (int idx = tid; idx < numElements; idx += totalThreads)
+    {
+        // Compute the 2D tile coordinates:
+        int local_x = (idx % tileDimX)/ratio_x;
+        int local_y = (idx / tileDimX)/ratio_z;
+
+        // Clamp indices to global boundaries.
+        if (gx >= nx)
+            gx = nx - 1;
+        if (gz >= nz)
+            gz = nz - 1;
+
+        // Compute the flat index into the global data array for each shot plane.
+        int idx1 = s0 * (nx * nz) + gz * nx + gx;
+        int idx2 = s1 * (nx * nz) + gz * nx + gx;
+
+        // Compute the local (shared) index.
+        int localIdx = local_x + local_y * tileDimX;
+        sharedTile1[localIdx] = globalData[idx1];
+        sharedTile2[localIdx] = globalData[idx2];
+    }
+
+    
+    
+}
+
+// Device function that performs some operation on a block of data in shared memory.
+__device__ float bilinearInterpolate(const float V000, const float V001, const float V010, const float V011,
+                                     const float V100, const float V101, const float V110, const float V111,
+    float s0, float s1, float x0, float x1, float z0, float z1, float s_query,
+float x_query, float z_query) {
+    // For example, perform a bilinear interpolation on the four corners.
+    // Assume the sharedTile is a 2D array of dimensions tileDimY x tileDimX stored in row-major order.
+    // Using linear basis functions:
+    //   B0(u) = 1 - u,  B1(u) = u.
+
+    // # Compute the fractional distances along each axis.
+    const float u_s = (s_query - s0) / (s1 - s0);
+    const float u_z = (z_query - z0) / (z1 - z0);
+    const float u_x = (x_query - x0) / (x1 - x0);
+
+    // # For linear interpolation, the local basis functions are:
+    // #   B0(u) = 1 - u   and   B1(u) = u
+    const float Bs0 = 1.0f - u_s;
+    const float Bs1 = u_s;
+    const float Bz0 = 1.0f - u_z;
+    const float Bz1 = u_z;
+    const float Bx0 = 1.0f - u_x;
+    const float Bx1 = u_x;
+    
+    // # Compute the weighted sum.
+    const float interpValue =  (Bs0 * Bz0 * Bx0 * V000 +
+                                Bs0 * Bz0 * Bx1 * V001 +
+                                Bs0 * Bz1 * Bx0 * V010 +
+                                Bs0 * Bz1 * Bx1 * V011 +
+                                Bs1 * Bz0 * Bx0 * V100 +
+                                Bs1 * Bz0 * Bx1 * V101 +
+                                Bs1 * Bz1 * Bx0 * V110 +
+                                Bs1 * Bz1 * Bx1 * V111);
+
+    return interpValue;
+}
+
+__device__ float hermiteInterpolate(const float V000, const float V001, const float V010, const float V011,
+                                      const float V100, const float V101, const float V110, const float V111,
+                                      float s0, float s1, 
+                                      float x0, float x1, 
+                                      float z0, float z1, 
+                                      float s_query, float x_query, float z_query,
+                                      float d0, float d1)
+{
+    // Compute the normalized parameter t for the shot dimension.
+    // t=0 corresponds to s0 and t=1 corresponds to s1.
+    float t = (s_query - s0) / (s1 - s0);
+
+    // Compute the standard cubic Hermite basis functions:
+    // h00(t) = 2t^3 - 3t^2 + 1
+    // h10(t) = t^3 - 2t^2 + t
+    // h01(t) = -2t^3 + 3t^2
+    // h11(t) = t^3 - t^2
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+    float h10 = t3 - 2.0f * t2 + t;
+    float h01 = -2.0f * t3 + 3.0f * t2;
+    float h11 = t3 - t2;
+    
+    // For the spatial (x,z) bilinear interpolation, compute the local fractional coordinates.
+    float u_x = (x_query - x0) / (x1 - x0);
+    float u_z = (z_query - z0) / (z1 - z0);
+    
+    // Compute the bilinear interpolation on the first shot plane:
+    float T0 = ( (1.0f - u_z) * (1.0f - u_x) * V000 +
+                 (1.0f - u_z) * (        u_x) * V001 +
+                 (        u_z) * (1.0f - u_x) * V010 +
+                 (        u_z) * (        u_x) * V011 );
+    
+    // Compute the bilinear interpolation on the second shot plane:
+    float T1 = ( (1.0f - u_z) * (1.0f - u_x) * V100 +
+                 (1.0f - u_z) * (        u_x) * V101 +
+                 (        u_z) * (1.0f - u_x) * V110 +
+                 (        u_z) * (        u_x) * V111 );
+    
+    // Now perform cubic Hermite interpolation in the shot direction.
+    // The derivatives d0 and d1 must represent dT/ds at s0 and s1, respectively.
+    float ds = s1 - s0; // cell length in shot dimension
+    float T_val = h00 * T0 + h10 * ds * d0 + h01 * T1 + h11 * ds * d1;
+    
+    return T_val;
+}
+
+#define INTERP_HALO 1
+#define BLOCK_X 32
+#define BLOCK_Y 32
+
 extern "C" {
 
     // Kernel that performs on-the-fly migration for one output pixel (as shown previously)
     __global__ void _migrate_variable_velocity(const float* __restrict__ data,
                                                 const float* __restrict__ cdp,
                                                 const float* __restrict__ offsets,
-                                                const float* __restrict__ SourceTraveltime,
-                                                const float* __restrict__ ReceiverTraveltime,
+                                                const float* __restrict__ Traveltime,
+                                                const float* __restrict__ Gradient,
+                                                int src_index,
+                                                int rec_index,
+                                                float s0, float s1,
+                                                float r0, float r1,
                                                 float v,
-                                                float dt, float dx, float dz,
+                                                float dt, float dx_fine, float dz_fine,
+                                                float dx_coarse, float dz_coarse,
                                                 int nsmp, int ntraces, int init_traces,
-                                                int nx, int nz,
-                                                float* __restrict__ R)
+                                                int nx_coarse, int nz_coarse,
+                                                int nx_fine, int nz_fine,
+                                                float* __restrict__ R,
+                                                int tileDimX, int tileDimZ, int num_eikonals)
     {
         // Each thread computes one output pixel (ix, iz)
         int ix = blockIdx.x * blockDim.x + threadIdx.x;
         int iz = blockIdx.y * blockDim.y + threadIdx.y;
-        if (ix >= nx || iz >= nz) return;
-    
-        float x = ix * dx;
-        float z = iz * dz;
-        float sum = 0.0f;
+        if (ix >= nx_fine - 1 || iz >= nz_fine - 1) return;
+
+        // Allocate shared memory for two shot planes for this coarse cell tile.
+        extern __shared__ float s_traveltime_src1[];
+        extern __shared__ float s_traveltime_src2[];
+
+        extern __shared__ float s_traveltime_rec1[];
+        extern __shared__ float s_traveltime_rec2[];
+
+
+
+        float x = ix * dx_fine;
+        float z = iz * dz_fine;
+
+        float lx_fine = threadIdx.x * dx_fine;
+        float lz_fine = threadIdx.y * dz_fine;
+
+        int l_ix_coarse = static_cast<int>(lx_fine/dx_coarse);
+        int l_iz_coarse = static_cast<int>(lz_fine/dz_coarse);
+
+        int ix_coarse = static_cast<int>(x/dx_coarse);
+        int iz_coarse = static_cast<int>(z/dz_coarse);
+
+        if (ix_coarse >= nx_coarse)
+            ix_coarse = nx_coarse - 2;
         
+        if (iz_coarse >= nz_coarse)
+            iz_coarse = nz_coarse - 2;
+
+        float coarse_x0 = ix_coarse * dx_coarse;
+        float coarse_x1 = coarse_x0 + dx_coarse;
+
+        float coarse_z0 = iz_coarse * dz_coarse;
+        float coarse_z1 = coarse_z0 + dz_coarse;
+
+
+        // copy_coarse_traveltimes_to_shared_memory(Traveltime, s_traveltime_src1, 
+        //     s_traveltime_src2, src_index, src_index+1, tileDimX, tileDimZ, ix_coarse, iz_coarse, 
+        //     nx_coarse, nz_coarse, nx_fine/nx_coarse, nz_fine/nz_coarse);
+
+        // copy_coarse_traveltimes_to_shared_memory(Traveltime, s_traveltime_rec1, 
+        //     s_traveltime_rec2, rec_index, rec_index+1, tileDimX, tileDimZ, ix_coarse, iz_coarse, 
+        //     nx_coarse, nz_coarse, nx_fine/nx_coarse, nz_fine/nz_coarse);
+
+        // __syncthreads();
+
+        int s_offset = src_index * nx_coarse * nz_coarse;
+        int s_offset_1 = (src_index+1) * nx_coarse * nz_coarse;
+
+        int r_offset = rec_index * nx_coarse * nz_coarse;
+        int r_offset_1 = (rec_index + 1) * nx_coarse * nz_coarse;
+
+        float sum = 0.0f;
+        float t_val;
         // Loop over traces
         #pragma unroll 9
         for (int j = init_traces; j < init_traces+ntraces; j++) {
             
             float cdp_val = cdp[j];    // effective CDP for trace j
             float h = offsets[j] * 0.5f; // half offset for trace j
-            // float doffset = fabsf(offsets[j+1]-offsets[j]);
+
             float source = cdp_val - h;
             float receiver = cdp_val + h;
             
@@ -460,12 +656,42 @@ extern "C" {
             if (rs < eps) rs = eps;
             if (rr < eps) rr = eps;
 
-            float s_traveltime = 1.0f / SourceTraveltime[ix + iz * nx];
-            float r_traveltime = 1.0f / ReceiverTraveltime[ix + iz * nx];
+            float s_traveltime = bilinearInterpolate(Traveltime[s_offset + ix_coarse + nx_coarse * iz_coarse],      Traveltime[s_offset + ix_coarse + 1 + nx_coarse * iz_coarse],
+                                                     Traveltime[s_offset + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[s_offset + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
 
-            
+                                                     Traveltime[s_offset_1 + ix_coarse + nx_coarse * iz_coarse],    Traveltime[s_offset_1 + ix_coarse + 1 + nx_coarse * iz_coarse],
+                                                     Traveltime[s_offset_1 + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[s_offset_1 + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+                                                    s0, s1, coarse_x0, coarse_x1, coarse_z0, coarse_z1, source, x, z);
+
+            float r_traveltime = bilinearInterpolate(Traveltime[r_offset + ix_coarse + nx_coarse * iz_coarse],      Traveltime[r_offset + ix_coarse + 1 + nx_coarse * iz_coarse],
+                                                     Traveltime[r_offset + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[r_offset + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+                                                     
+                                                     Traveltime[r_offset_1 + ix_coarse + nx_coarse * iz_coarse],    Traveltime[r_offset_1 + ix_coarse + 1 + nx_coarse * iz_coarse],
+                                                     Traveltime[r_offset_1 + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[r_offset_1 + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+                                                    s0, s1, coarse_x0, coarse_x1, coarse_z0, coarse_z1, source, x, z);
+
+            // float s_traveltime = hermiteInterpolate(Traveltime[s_offset + ix_coarse + nx_coarse * iz_coarse],      Traveltime[s_offset + ix_coarse + 1 + nx_coarse * iz_coarse],
+            //                                          Traveltime[s_offset + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[s_offset + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+
+            //                                          Traveltime[s_offset_1 + ix_coarse + nx_coarse * iz_coarse],    Traveltime[s_offset_1 + ix_coarse + 1 + nx_coarse * iz_coarse],
+            //                                          Traveltime[s_offset_1 + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[s_offset_1 + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+            //                                         s0, s1, coarse_x0, coarse_x1, coarse_z0, coarse_z1, source, x, z,
+            //                                         Gradient[s_offset + ix_coarse + nx_coarse * iz_coarse], Gradient[s_offset_1 + ix_coarse + nx_coarse * iz_coarse]);
+
+            // float r_traveltime = hermiteInterpolate(Traveltime[r_offset + ix_coarse + nx_coarse * iz_coarse],      Traveltime[r_offset + ix_coarse + 1 + nx_coarse * iz_coarse],
+            //                                          Traveltime[r_offset + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[r_offset + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+                                                     
+            //                                          Traveltime[r_offset_1 + ix_coarse + nx_coarse * iz_coarse],    Traveltime[r_offset_1 + ix_coarse + 1 + nx_coarse * iz_coarse],
+            //                                          Traveltime[r_offset_1 + ix_coarse + nx_coarse * (iz_coarse+1)],  Traveltime[r_offset_1 + ix_coarse + 1 + nx_coarse * (iz_coarse + 1)],
+            //                                         s0, s1, coarse_x0, coarse_x1, coarse_z0, coarse_z1, source, x, z, 
+            //                                         Gradient[r_offset + ix_coarse + nx_coarse * iz_coarse], Gradient[r_offset_1 + ix_coarse + nx_coarse * iz_coarse]);
+
+
+
             // Compute two-way travel time:
-            float t_val = s_traveltime + r_traveltime;
+            // float t_val = s_traveltime + r_traveltime;
+            t_val = s_traveltime + r_traveltime;
+            // t_val = (rs + rr) / v;
             int it = (int) floorf(t_val / dt);
             if (it < 0 || it >= nsmp) continue;
             
@@ -481,101 +707,119 @@ extern "C" {
             sum += amp * weight;
         }
         // Write the accumulated sum to the output migrated image R (assume row-major, shape (nx, nz))
-        R[ix + iz * nx] = sum;
+        R[ix + iz * nx_fine] += sum;
+        // R[ix + iz * nx_fine] = t_val;
     }
 }
 
 
 extern "C" void migrate_variable_velocity(const float* data, const float* cdp, const float* offsets, 
                                             const float* eikonal_positions, const int* segments,
-                                            float v, float dt, float dx, float dz,
+                                            float v, float dt, float dx_fine, float dz_fine, 
+                                            float dx_coarse, float dz_coarse,
                                             int nsmp, int ntraces,
                                             int nx_coarse, int nz_coarse,
                                             int nx_fine, int nz_fine,
                                             float* R,
                                             const char* traveltime_filename,
                                             const char* gradient_filename,
-                                            int num_segments)
+                                            int num_segments,
+                                            int num_eikonals)
 {
 
 
     // Assume each coarse traveltime field has the same size:
 
-    size_t num_floats = 226*nx_coarse * nz_coarse * sizeof(float);
+    size_t num_floats = num_eikonals * nx_coarse * nz_coarse;
 
-    // allocated fine traveltime
-    float* d_SourceTravelTime_fine = NULL;
-    float* d_ReceiverTravelTime_fine = NULL;
-
-    // size_t fine_size_bytes = nx_fine * nz_fine * sizeof(float);
-    // cudaMalloc((void**)&d_SourceTravelTime_fine, num_floats);
-    // cudaMalloc((void**)&d_ReceiverTravelTime_fine, num_floats);
-
-    float* h_SourceTravelTimeCoarse = load_binary_file(traveltime_filename, &num_floats);
-    if (!h_SourceTravelTimeCoarse) {
+    float* h_travelTimeCoarse = load_binary_file(traveltime_filename, &num_floats);
+    if (!h_travelTimeCoarse) {
         fprintf(stderr, "Failed to load file.\n");
         // return 1;
     }
 
-    float* d_ReceiverTravelTime_fine = load_binary_file(traveltime_filename, &num_floats);
-
-    if (!h_TravelTimeCoarse) {
+    float* h_GradientCoarse = load_binary_file(gradient_filename, &num_floats);
+    if (!h_GradientCoarse) {
         fprintf(stderr, "Failed to load file.\n");
         // return 1;
     }
 
+    int x_ratio = nx_fine/nx_coarse;
+    int z_ratio = nz_fine/nz_coarse;
 
-    float* d_TravelTimeCoarse = copy_to_device(h_TravelTimeCoarse, num_floats);
+    float *d_Data = copy_to_device(data, ntraces*nsmp);
+    float *d_cdp = copy_to_device(cdp, ntraces);
+    float *d_offsets = copy_to_device(offsets, ntraces);
+    float *d_R = allocateGpuMemory<float>(nx_fine * nz_fine);
+    float* d_TravelTimeCoarse = copy_to_device(h_travelTimeCoarse, num_floats);
+    float* d_GradientCoarse = copy_to_device(h_GradientCoarse, num_floats);
 
-    int old_src_index = -1;
-    int old_rec_index = -1;
+    float firstEikonal = eikonal_positions[0];
+
+    float eikonal_spacing = eikonal_positions[1] - eikonal_positions[0];
+
     size_t init_traces = 0;
-    for (int field = 0; field < num_segments; field++) {
-        
-        int n_traces = segments[field];
 
+    for (int field = 0; field < num_segments; field++) {
+
+        int n_traces = segments[field];
+        
         float sx = cdp[init_traces] - 0.5f * offsets[init_traces];
         float rx = cdp[init_traces] + 0.5f * offsets[init_traces];
 
-        int src_index = static_cast<int>(sx/300.0f);
-        int rec_index = static_cast<int>(rx/300.0f);
+        int src_index = static_cast<int>((sx-firstEikonal)/eikonal_spacing);
+        int rec_index = static_cast<int>((rx-firstEikonal)/eikonal_spacing);
 
-        float x_x0_src = eikonal_positions[src_index] - sx;
-        float x_x0_rec = eikonal_positions[rec_index] - rx;
+        int s0_index = src_index;
+        int s1_index = src_index+1;
 
-        // if (old_src_index != src_index)
-        // {
-        //     resample_field_into_npp_cubic(d_TravelTimeCoarse, d_SourceTravelTime_fine,  src_index, 
-        //         nx_coarse, nz_coarse, nx_fine, nz_fine);
-            
-        //     old_src_index = src_index;
-        // }
-            
-        // if (old_rec_index != rec_index)
-        // {
-        //     resample_field_into_npp_cubic(d_TravelTimeCoarse, d_ReceiverTravelTime_fine,  rec_index, 
-        //         nx_coarse, nz_coarse, nx_fine, nz_fine);
-            
-        //     old_rec_index = rec_index;
-        // }
-            
-        dim3 block(16, 16);
+        if (s1_index >= num_eikonals)
+        {
+            s0_index=num_eikonals-2;
+            s1_index=num_eikonals-1;
+        }
+
+        int r0_index = rec_index;
+        int r1_index = rec_index+1;
+
+        if (r1_index >= num_eikonals)
+        {
+            r0_index=num_eikonals-2;
+            r1_index=num_eikonals-1;
+        }
+
+        dim3 block(BLOCK_X, BLOCK_Y);
         dim3 grid((nx_fine + block.x - 1) / block.x, (nz_fine + block.y - 1) / block.y);
-        // dim3 grid((ntraces + block.x - 1) / block.x, (nx + block.y - 1) / block.y);
+
+        // Suppose at runtime you calculate:
+        int tileDimX = BLOCK_X/x_ratio + 1;
+        int tileDimZ = BLOCK_Y/z_ratio + 1;
+        int sharedMemSize = tileDimX * tileDimZ * sizeof(float);
         
         // Launch the kernel.
-        _migrate_variable_velocity<<<grid, block>>>(data, cdp, offsets, d_SourceTravelTime_fine, 
-                                                    d_ReceiverTravelTime_fine, v, dt, dx, dz,
-                                                     nsmp, ntraces, init_traces, nx_fine, nz_fine, R);
+        _migrate_variable_velocity<<<grid, block, sharedMemSize>>>(d_Data, d_cdp, d_offsets, d_TravelTimeCoarse, d_GradientCoarse,
+                                                    s0_index, r0_index, 
+                                                    eikonal_positions[s0_index],eikonal_positions[s1_index],
+                                                    eikonal_positions[r0_index],eikonal_positions[r1_index],
+                                                    v, dt, dx_fine, dz_fine,
+                                                    dx_coarse, dz_coarse,
+                                                     nsmp, n_traces, init_traces, 
+                                                     nx_coarse, nz_coarse,
+                                                     nx_fine, nz_fine, d_R, 
+                                                     tileDimX, tileDimZ, num_eikonals);
         cudaDeviceSynchronize();
         init_traces += n_traces;
-        
     }
 
-    cudaFree(d_SourceTravelTime_fine);
-    cudaFree(d_ReceiverTravelTime_fine);
+    CHECK_CUDA(cudaMemcpy(R, d_R, nx_fine * nz_fine * sizeof(float), cudaMemcpyDeviceToHost));
+
     cudaFree(d_TravelTimeCoarse);
-    free(h_TravelTimeCoarse);
+    cudaFree(d_offsets);
+    cudaFree(d_cdp);
+    cudaFree(d_R);
+    cudaFree(d_Data);
+    free(h_travelTimeCoarse);
+    free(h_GradientCoarse);
 }
 
 

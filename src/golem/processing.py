@@ -5,7 +5,11 @@ import os
 import inspect
 import re
 import pylops
-import cupy as cp
+
+try:
+    import cupy as cp
+except ImportError:  # pragma: no cover - optional dependency
+    cp = None
 
 def kill_traces_outside_box(context, key_geometry='geometry', key_data='data', columns=['SourceX','SourceY','GroupX','GroupY']):
     """
@@ -456,7 +460,8 @@ def calculate_convolution_operator(context, key="data", threshold_ratio=0.002):
 def free_gpu_memory(func):
     def wrapper_func(*args, **kwargs):
         retval = func(*args, **kwargs)
-        cp._default_memory_pool.free_all_blocks()
+        if cp is not None:
+            cp._default_memory_pool.free_all_blocks()
         return retval
     return wrapper_func
 
@@ -489,6 +494,8 @@ def apply_designature(context, key_input="wavelet_input", key_output="wavelet_ou
 
            
             if mode == "gpu":
+                if cp is None:
+                    raise ImportError("cupy is required for GPU designature. Install golem with the 'gpu' extra or set mode='cpu'.")
 
                 wavelet_in_cut_gpu = cp.array(wavelet_in_cut)
                 wavelet_out_cut_gpu = cp.array(wavelet_out_cut)
@@ -524,9 +531,9 @@ def apply_designature(context, key_input="wavelet_input", key_output="wavelet_ou
     except Exception as e:
         print(f"❌ Failed to apply designature: {e}")
         return None
-def sort(context, header1, header2=None, key="data"):
-    df = context.get("geometry")
-    data = context.get(key)
+def sort(context, header1, header2=None, key_data="data", key_geometry="geometry"):
+    df = context.get(key_geometry)
+    data = context.get(key_data)
 
     if df is None or not isinstance(df, pd.DataFrame):
         print("❌ Error: 'geometry' not found or invalid.")
@@ -553,8 +560,8 @@ def sort(context, header1, header2=None, key="data"):
         sorted_data = data[:, sorted_positions]
 
         # Update context
-        context["geometry"] = sorted_df
-        context[key] = sorted_data
+        context[key_geometry] = sorted_df
+        context[key_data] = sorted_data
 
         print(f"✅ Geometry and data sorted by: {', '.join(sort_cols)}")
         return sorted_df
