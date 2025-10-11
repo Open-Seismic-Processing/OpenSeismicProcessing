@@ -142,7 +142,7 @@ def get_trace_data(context, file_path, ignore_geometry=True):
                 # Open the SEGY file
                 segy_file = open_segy_data(segy_file_path,ignore_geometry=ignore_geometry)
                 # Extract trace data and add to list
-                trace_data = segy_file.trace.raw[:].T
+                trace_data = np.ascontiguousarray(segy_file.trace.raw[:].T)
                 trace_data_list.append(trace_data)
             except Exception as e:
                 print(f"❌ Error: Failed to process SEGY file '{segy_file_path}': {e}")
@@ -176,7 +176,7 @@ def get_trace_data(context, file_path, ignore_geometry=True):
 
         try:
             # Extract the trace data from the file.
-            trace_data = segy_file.trace.raw[:].T
+            trace_data = np.ascontiguousarray(segy_file.trace.raw[:].T)
         except Exception as e:
             print(f"❌ Error: Failed to extract trace data from '{file_path}': {e}")
             trace_data = None

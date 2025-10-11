@@ -185,12 +185,13 @@ def segy_directory_to_zarr(
 
     amp = root.create_dataset(
         "amplitude",
-        shape=(total_traces, ns),
-        chunks=(chunk_trace, ns),
+        shape=(ns, total_traces),
+        chunks=(ns, chunk_trace),
         dtype="float32",
         compressor=compressor,
     )
-    amp.attrs["_ARRAY_DIMENSIONS"] = ["trace", "sample"]
+    amp.attrs["_ARRAY_DIMENSIONS"] = ["sample", "trace"]
+    amp.attrs["layout"] = "sample_trace"
 
     header_arrays = {}
     for header in headers:
@@ -227,9 +228,7 @@ def segy_directory_to_zarr(
                 entry["text_header"] = []
 
             ntr = len(f.trace)
-            data = np.empty((ntr, ns), dtype=np.float32)
-            for i, tr in enumerate(f.trace):
-                data[i, :] = tr
+            data = np.asarray(f.trace.raw[:], dtype=np.float32)
 
             geom: dict[str, Iterable[float]] = {}
             if "offset" in lower_to_original:
@@ -253,7 +252,7 @@ def segy_directory_to_zarr(
                 )
 
         idx_end = offset + ntr
-        amp[offset:idx_end, :] = data
+        amp[:, offset:idx_end] = data.T
         for header_name, values in geom.items():
             header_arrays[header_name][offset:idx_end] = values
         offset = idx_end
