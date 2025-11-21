@@ -1,12 +1,14 @@
 import os
 import numpy as np
 import pandas as pd
+from typing import Dict, Tuple, Any, Optional
 
 from ._io import (
     open_segy_data,
     parse_trace_headers,
     parse_text_header
 )
+from .constants import TRACE_HEADER_REV0, BINARY_HEADER_REV0
 
 def store_geometry_as_parquet(context, file_path, key_geometry="geometry"):
     """
@@ -318,6 +320,36 @@ def get_text_header(context, file_path):
     segy_file.close()
 
     return text_headers
+
+HeaderSpec = Dict[str, Tuple[int, int]]
+
+def read_trace_headers_until(
+    file_path: str,
+    header_spec: Optional[HeaderSpec] = None,
+    num_traces: Optional[int] = None,
+    include_unassigned: bool = False,
+) -> Dict[str, np.ndarray]:
+    """
+    Read trace header fields defined in ``header_spec`` for the traces
+    [0:num_traces] of the provided SEG-Y file.
+    """
+    if header_spec is None:
+        header_spec = TRACE_HEADER_REV0
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(file_path)
+
+    with open_segy_data(file_path, ignore_geometry=True) as segy_file:
+        n_total = segy_file.tracecount
+        ntr = n_total if num_traces is None else min(num_traces, n_total)
+        result: Dict[str, np.ndarray] = {}
+        for name, (start_byte, length) in header_spec.items():
+            if not include_unassigned and name.startswith("unassigned_"):
+                continue
+            vals = segy_file.attributes(start_byte)[:ntr]
+            result[name] = vals
+
+    return result
 
 def read_data(context, file_path, format="binary", order='C', shape=None):
     if not os.path.isfile(file_path):
