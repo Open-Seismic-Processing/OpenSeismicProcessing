@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1080</width>
+    <height>780</height>
+   </rect>
+  </property>
+  <property name="font">
+   <font>
+    <family>DejaVu Serif</family>
+    <pointsize>18</pointsize>
+    <weight>75</weight>
+    <bold>true</bold>
+   </font>
+  </property>
+  <property name="windowTitle">
+   <string>Open Seismic Processing</string>
+  </property>
+  <property name="windowIcon">
+   <iconset>
+    <normaloff>seismic_icon.png</normaloff>seismic_icon.png</iconset>
+  </property>
+  <widget class="QWidget" name="centralwidget"/>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1080</width>
+     <height>34</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menu_Survey">
+    <property name="font">
+     <font>
+      <family>DejaVu Serif</family>
+      <pointsize>14</pointsize>
+      <weight>75</weight>
+      <bold>true</bold>
+     </font>
+    </property>
+    <property name="title">
+     <string>&amp;Survey</string>
+    </property>
+    <widget class="QMenu" name="menu_Import">
+     <property name="font">
+      <font>
+       <family>DejaVu Serif</family>
+       <pointsize>14</pointsize>
+       <weight>75</weight>
+       <bold>true</bold>
+      </font>
+     </property>
+     <property name="title">
+      <string>&amp;Import...</string>
+     </property>
+     <addaction name="action_Seg_y_file"/>
+    </widget>
+    <widget class="QMenu" name="menu_Export">
+     <property name="font">
+      <font>
+       <family>DejaVu Serif</family>
+       <pointsize>14</pointsize>
+       <weight>75</weight>
+       <bold>true</bold>
+      </font>
+     </property>
+     <property name="title">
+      <string>&amp;Export...</string>
+     </property>
+     <addaction name="action_Seg_y_file_2"/>
+     <addaction name="action_Binary_file"/>
+    </widget>
+    <addaction name="action_Select_Setup"/>
+    <addaction name="edit_parameters"/>
+    <addaction name="menu_Import"/>
+    <addaction name="menu_Export"/>
+    <addaction name="action_Save"/>
+   </widget>
+   <widget class="QMenu" name="menu_Processing">
+    <property name="title">
+     <string>&amp;Processing</string>
+    </property>
+   </widget>
+   <widget class="QMenu" name="View">
+    <property name="title">
+     <string>&amp;View</string>
+    </property>
+    <addaction name="action_Base_Map"/>
+   </widget>
+   <widget class="QMenu" name="menu_File">
+    <property name="title">
+     <string>File</string>
+    </property>
+    <addaction name="action_Set_Root_Folder"/>
+   </widget>
+   <widget class="QMenu" name="menu_Help">
+    <property name="title">
+     <string>&amp;Help</string>
+    </property>
+   </widget>
+   <widget class="QMenu" name="menu_About">
+    <property name="title">
+     <string>&amp;About</string>
+    </property>
+   </widget>
+   <addaction name="menu_File"/>
+   <addaction name="menu_Survey"/>
+   <addaction name="menu_Processing"/>
+   <addaction name="View"/>
+   <addaction name="menu_Help"/>
+   <addaction name="menu_About"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+  <action name="edit_parameters">
+   <property name="text">
+    <string>&amp;Edit Parameters...</string>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>14</pointsize>
+    </font>
+   </property>
+  </action>
+  <action name="action_Seg_y_file">
+   <property name="text">
+    <string>&amp;Seg-y file...</string>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>14</pointsize>
+    </font>
+   </property>
+  </action>
+  <action name="action_Seg_y_file_2">
+   <property name="text">
+    <string>&amp;Seg-y file...</string>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>14</pointsize>
+    </font>
+   </property>
+  </action>
+  <action name="action_Binary_file">
+   <property name="text">
+    <string>&amp;Binary file...</string>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>14</pointsize>
+    </font>
+   </property>
+  </action>
+  <action name="action_Save">
+   <property name="text">
+    <string>&amp;Save</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+S</string>
+   </property>
+  </action>
+  <action name="action_Base_Map">
+   <property name="text">
+    <string>&amp;Base Map</string>
+   </property>
+  </action>
+  <action name="action_Set_Root_Folder">
+   <property name="text">
+    <string>&amp;Set Root Folder...</string>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>12</pointsize>
+    </font>
+   </property>
+  </action>
+  <action name="action_New">
+   <property name="text">
+    <string>&amp;New...</string>
+   </property>
+  </action>
+  <action name="action_Load">
+   <property name="text">
+    <string>&amp;Load...</string>
+   </property>
+  </action>
+  <action name="action_Select_Setup">
+   <property name="text">
+    <string>&amp;Select/Setup ...</string>
+   </property>
+  </action>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
