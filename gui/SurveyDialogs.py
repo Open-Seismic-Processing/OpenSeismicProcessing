@@ -1140,7 +1140,7 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         mode = self.GetAcquisitionType() or ""
         spec = self._current_header_spec()
 
-        columns=[]
+        columns = []
         prev_selection = (
             self.comboBox.currentText(),
             self.comboBox2.currentText(),
@@ -1148,16 +1148,17 @@ class ImportSEGYDialog(QtWidgets.QDialog):
             self.comboBox4.currentText(),
         ) if preserve_selection else (None, None, None, None)
 
-        def keys_for_mode(names):
-            return [name for name in names if name in spec]
-
-        if "3D Pre-stack" in mode or "2D Pre-stack" in mode:
-            columns = keys_for_mode(["sx", "sy", "gx", "gy"])
+        if self.SEGY_Dataframe is not None and not self.SEGY_Dataframe.empty:
+            columns = list(dict.fromkeys(self.SEGY_Dataframe.columns))
         else:
-            columns = keys_for_mode(["cdp", "cdpt", "cdpx", "cdpy"])
-
-        if not columns:
-            columns = list(spec.keys())[:4]
+            def keys_for_mode(names):
+                return [name for name in names if name in spec]
+            if "3D Pre-stack" in mode or "2D Pre-stack" in mode:
+                columns = keys_for_mode(["sx", "sy", "gx", "gy"])
+            else:
+                columns = keys_for_mode(["cdp", "cdpt", "cdpx", "cdpy"])
+            if not columns:
+                columns = list(spec.keys())[:4]
 
         self.comboBox.blockSignals(True)
         self.comboBox2.blockSignals(True)
