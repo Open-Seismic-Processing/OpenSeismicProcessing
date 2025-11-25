@@ -54,10 +54,10 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Warning", "Please select a root folder first!")
             return
         # Get the list of folder names from the root directory
-        self.folder_list = [
+        self.folder_list = sorted([
            folder for folder in os.listdir(self.rootFolderPath)
            if os.path.isdir(os.path.join(self.rootFolderPath, folder))
-       ]
+       ], key=str.lower)
 
         dialog = DialogBox(self, selected_survey=self.currentSurveyName)  # Instantiate the custom dialog
         if dialog.exec():  # Show the dialog and wait for it to close
@@ -193,6 +193,23 @@ class OpenSeismicProcessingWindow(QtWidgets.QMainWindow):
         ax.set_title(f"Basemap: {self.currentSurveyName or ''}")
         ax.legend()
         ax.grid(True, linestyle="--", alpha=0.3)
+
+        # Plot survey bounding box if available
+        boundary = None
+        if self.currentSurveyName:
+            try:
+                project = next(p for p in list_projects() if p["name"] == self.currentSurveyName)
+                metadata = project.get("metadata", {}) or {}
+                boundary = metadata.get("boundary", metadata)
+            except StopIteration:
+                boundary = None
+        if boundary and "x_range" in boundary and "y_range" in boundary:
+            x_min, x_max = boundary["x_range"]
+            y_min, y_max = boundary["y_range"]
+            rect_x = [x_min, x_max, x_max, x_min, x_min]
+            rect_y = [y_min, y_min, y_max, y_max, y_min]
+            ax.plot(rect_x, rect_y, color="green", linewidth=1.5, linestyle="--", label="Boundary")
+            ax.legend()
 
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Basemap")

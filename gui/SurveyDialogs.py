@@ -1729,6 +1729,7 @@ class DialogBox(QtWidgets.QDialog):
 
                 if survey_name not in self.main.folder_list:
                     self.main.folder_list.append(survey_name)
+                    self.main.folder_list = sorted(self.main.folder_list, key=str.lower)
 
                 # ✅ Refresh the list in surveyListView
                 self.UpdateSurveyList(select_name=survey_name)
