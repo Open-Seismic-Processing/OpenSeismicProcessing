@@ -166,9 +166,24 @@ def display_centered(fig):
     html = f'<div style="text-align: center;"><img src="data:image/png;base64,{img_b64}"/></div>'
     display(HTML(html))
 
-def plot_seismic_image(context, xlabel, ylabel, y_spacing, x_header, perc=None,
-                       key_data="data", key_geometry="geometry",
-                       xlim=None, ylim=None, figure_dims=(7,9), cmap='gray_r'):
+def plot_seismic_image(
+    context,
+    xlabel,
+    ylabel,
+    y_spacing,
+    x_header,
+    perc=None,
+    key_data="data",
+    key_geometry="geometry",
+    xlim=None,
+    ylim=None,
+    figure_dims=(7, 9),
+    cmap="gray_r",
+    vmin=None,
+    vmax=None,
+    ax=None,
+    show=True,
+):
     """
     Plots a seismic image based on provided data and geometry.
     
@@ -188,7 +203,7 @@ def plot_seismic_image(context, xlabel, ylabel, y_spacing, x_header, perc=None,
         cmap (str): Colormap for displaying the seismic image.
         
     Returns:
-        None. Displays the seismic image.
+        None. Displays the seismic image (unless show is False).
     """
     def _get_amplitude(data_obj, key_name):
         if data_obj is None:
@@ -268,46 +283,58 @@ def plot_seismic_image(context, xlabel, ylabel, y_spacing, x_header, perc=None,
 
             if perc is not None and isinstance(perc, (int, float)) and perc > 0:
                 clip_value = np.percentile(data, perc)
-                vmin = -clip_value
-                vmax = clip_value
+                vmin_local = -clip_value
+                vmax_local = clip_value
             else:
-                vmin = np.min(data)
-                vmax = np.max(data)
+                vmin_local = np.min(data) if vmin is None else vmin
+                vmax_local = np.max(data) if vmax is None else vmax
 
-            plt.figure(figsize=figure_dims)
-            plt.imshow(data, aspect='auto', cmap=cmap, 
-                       vmin=vmin, vmax=vmax, extent=extent, interpolation="none")
-            plt.xlabel(xlabel)
-            plt.ylabel(ylabel)
-            plt.title("Seismic Image")
-            plt.colorbar(label="Amplitude")
+            current_ax = ax or plt.figure(figsize=figure_dims).gca()
+            current_ax.imshow(
+                data,
+                aspect="auto",
+                cmap=cmap,
+                vmin=vmin_local,
+                vmax=vmax_local,
+                extent=extent,
+                interpolation="none",
+            )
+            current_ax.set_xlabel(xlabel)
+            current_ax.set_ylabel(ylabel)
+            current_ax.set_title("Seismic Image")
+            cb_fig = current_ax.figure
+            cb_fig.colorbar(current_ax.images[0], ax=current_ax, label="Amplitude", fraction=0.046, pad=0.04)
 
             if xlim:
-                plt.xlim(xlim)
+                current_ax.set_xlim(xlim)
             if ylim:
-                plt.ylim(ylim)
+                current_ax.set_ylim(ylim)
 
-            plt.tight_layout()
-            # display_centered(plt.gcf())
-            plt.show()
+            current_ax.figure.tight_layout()
+            if ax is None and show:
+                plt.show()
+            elif ax is not None:
+                current_ax.figure.canvas.draw_idle()
 
         elif data.ndim == 1:
             y = np.arange(len(data)) * y_spacing
 
-            plt.figure(figsize=figure_dims)
-            plt.plot(data, y, color='black', linewidth=1)
-            plt.gca().invert_yaxis()  # Time increases downward
-            plt.xlabel("Amplitude")
-            plt.ylabel(ylabel)
-            plt.title("Stacked Seismic Trace")
-            plt.grid(True)
+            current_ax = ax or plt.figure(figsize=figure_dims).gca()
+            current_ax.plot(data, y, color='black', linewidth=1)
+            current_ax.invert_yaxis()  # Time increases downward
+            current_ax.set_xlabel("Amplitude")
+            current_ax.set_ylabel(ylabel)
+            current_ax.set_title("Stacked Seismic Trace")
+            current_ax.grid(True)
 
             if ylim:
-                plt.ylim(ylim[::-1])  # Reverse because time is vertical
+                current_ax.set_ylim(ylim[::-1])  # Reverse because time is vertical
 
-            plt.tight_layout()
-            # display_centered(plt.gcf())
-            plt.show()
+            current_ax.figure.tight_layout()
+            if ax is None and show:
+                plt.show()
+            elif ax is not None:
+                current_ax.figure.canvas.draw_idle()
         else:
             print(f"❌ Error: 'data' must be 1D or 2D. Got shape: {data.shape}")
 

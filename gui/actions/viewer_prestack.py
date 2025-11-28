@@ -1,0 +1,380 @@
+from pathlib import Path
+import json
+
+import pandas as pd
+import zarr
+import numpy as np
+from PyQt6 import QtCore, QtWidgets
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+from openseismicprocessing import processing
+from openseismicprocessing._plotting import plot_seismic_image
+from openseismicprocessing.catalog import list_projects
+
+
+def _list_manifests(survey_path: str | Path) -> list[Path]:
+    bin_dir = Path(survey_path) / "Binaries"
+    if not bin_dir.exists():
+        return []
+    return sorted(bin_dir.glob("*.manifest.json"), key=lambda p: p.name.lower())
+
+
+def _dataset_type(manifest: Path) -> str:
+    try:
+        data = json.loads(manifest.read_text())
+        return str(data.get("dataset_type", "")).lower()
+    except Exception:
+        return ""
+
+
+class PrestackViewer(QtWidgets.QWidget):
+    def __init__(self, parent, manifests, boundary=None):
+        super().__init__(parent)
+        self.manifests = manifests
+        self.boundary = boundary
+        self.current_manifest = None
+        self.manifest_meta = {}
+        self.geom_df = None
+        self.amp = None
+        self._current_subset_data: np.ndarray | None = None
+        self._current_subset_df: pd.DataFrame | None = None
+        self._current_header1: str | None = None
+        self._current_header2: str | None = None
+        self._current_target = None
+
+        layout = QtWidgets.QHBoxLayout(self)
+
+        self.dataset_list = QtWidgets.QListWidget()
+        self.dataset_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        for m in self.manifests:
+            name = m.stem.replace(".zarr", "").replace(".manifest", "")
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, m)
+            self.dataset_list.addItem(item)
+        self.dataset_list.itemChanged.connect(self.on_item_changed)
+
+        left = QtWidgets.QVBoxLayout()
+        left.addWidget(QtWidgets.QLabel("Datasets"))
+        left.addWidget(self.dataset_list, 2)
+        self.map_fig = Figure(figsize=(4, 3))
+        self.map_canvas = FigureCanvas(self.map_fig)
+        self.map_toolbar = NavigationToolbar2QT(self.map_canvas, self)
+        left.addWidget(self.map_toolbar)
+        left.addWidget(self.map_canvas, 1)
+        left.addStretch()
+        layout.addLayout(left, 1)
+
+        right = QtWidgets.QVBoxLayout()
+        top_row = QtWidgets.QHBoxLayout()
+
+        top_row.addWidget(QtWidgets.QLabel("Header 1"))
+        self.header1_combo = QtWidgets.QComboBox()
+        self.header1_combo.addItem("Select header")
+        top_row.addWidget(self.header1_combo)
+
+        top_row.addWidget(QtWidgets.QLabel("Header 2"))
+        self.header2_combo = QtWidgets.QComboBox()
+        self.header2_combo.addItem("Select header")
+        top_row.addWidget(self.header2_combo)
+
+        self.apply_btn = QtWidgets.QPushButton("Apply")
+        top_row.addWidget(self.apply_btn)
+
+        top_row.addWidget(QtWidgets.QLabel("Percentile"))
+        self.perc_spin = QtWidgets.QDoubleSpinBox()
+        self.perc_spin.setRange(0.0, 100.0)
+        self.perc_spin.setDecimals(2)
+        self.perc_spin.setValue(99.0)
+        top_row.addWidget(self.perc_spin)
+
+        right.addLayout(top_row)
+
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.valueChanged.connect(self.on_slider_changed)
+        right.addWidget(self.slider)
+
+        self.placeholder = QtWidgets.QLabel("Select a dataset to configure headers.")
+        self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        right.addWidget(self.placeholder)
+
+        self.figure = Figure(figsize=(8, 6))
+        self.canvas = FigureCanvas(self.figure)
+        right.addWidget(self.canvas, 1)
+
+        layout.addLayout(right, 3)
+
+        self.apply_btn.clicked.connect(self.apply_selection)
+        self.perc_spin.valueChanged.connect(self.on_limits_changed)
+
+    def on_item_changed(self, item: QtWidgets.QListWidgetItem):
+        if item.checkState() == QtCore.Qt.CheckState.Checked:
+            for i in range(self.dataset_list.count()):
+                other = self.dataset_list.item(i)
+                if other is not item and other.checkState() == QtCore.Qt.CheckState.Checked:
+                    other.setCheckState(QtCore.Qt.CheckState.Unchecked)
+            self.current_manifest = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            self._populate_headers()
+        else:
+            if self.current_manifest == item.data(QtCore.Qt.ItemDataRole.UserRole):
+                self.current_manifest = None
+                self.header1_combo.clear()
+                self.header2_combo.clear()
+                self.header1_combo.addItem("Select header")
+                self.header2_combo.addItem("Select header")
+                self.placeholder.setText("Select a dataset to configure headers.")
+                self.geom_df = None
+                self.amp = None
+                self.slider.blockSignals(True)
+                self.slider.setMaximum(0)
+                self.slider.setValue(0)
+                self.slider.blockSignals(False)
+                self._current_subset_data = None
+                self._current_subset_df = None
+                self._current_header1 = None
+                self._current_header2 = None
+                self._current_target = None
+                self._clear_map()
+
+    def _populate_headers(self):
+        meta = self._read_manifest(self.current_manifest)
+        geom_path = meta.get("geometry_parquet")
+        if not geom_path:
+            QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", "Geometry path missing in manifest.")
+            return
+        try:
+            df = pd.read_parquet(geom_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", f"Failed to read geometry:\n{exc}")
+            return
+        self.geom_df = df
+        headers = [str(c) for c in df.columns]
+        self.header1_combo.blockSignals(True)
+        self.header2_combo.blockSignals(True)
+        self.header1_combo.clear()
+        self.header2_combo.clear()
+        self.header1_combo.addItems(headers)
+        self.header2_combo.addItems(headers)
+        default_h1 = "fldr" if "fldr" in df.columns else headers[0] if headers else ""
+        default_h2 = "tracf" if "tracf" in df.columns else headers[1] if len(headers) > 1 else default_h1
+        if default_h1:
+            idx1 = self.header1_combo.findText(default_h1)
+            self.header1_combo.setCurrentIndex(idx1 if idx1 >= 0 else 0)
+        if default_h2:
+            idx2 = self.header2_combo.findText(default_h2)
+            self.header2_combo.setCurrentIndex(idx2 if idx2 >= 0 else 0)
+        self.header1_combo.blockSignals(False)
+        self.header2_combo.blockSignals(False)
+        name = self.current_manifest.stem.replace(".zarr", "").replace(".manifest", "")
+        self.placeholder.setText(f"Selected: {name}\nHeaders ready. Click Apply to load data.")
+
+    def _read_manifest(self, manifest: Path) -> dict:
+        try:
+            data = json.loads(manifest.read_text())
+            self.manifest_meta[manifest] = data
+            return data
+        except Exception:
+            return {}
+
+    def apply_selection(self):
+        if not self.current_manifest:
+            QtWidgets.QMessageBox.information(self, "Pre-stack Viewer", "Select a dataset first.")
+            return
+        meta = self.manifest_meta.get(self.current_manifest) or self._read_manifest(self.current_manifest)
+        geom_path = meta.get("geometry_parquet")
+        zarr_path = meta.get("zarr_store")
+        header1 = self.header1_combo.currentText()
+        header2 = self.header2_combo.currentText()
+        if not geom_path or not zarr_path:
+            QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", "Manifest is missing required paths.")
+            return
+        try:
+            self.geom_df = pd.read_parquet(geom_path)
+            self.amp = zarr.open(zarr_path, mode="r")["amplitude"]
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", f"Failed to load data:\n{exc}")
+            return
+        try:
+            context = {"geometry": self.geom_df.copy(), "data": self.amp[:]}
+            processing.sort(context, header1, header2)
+            self.geom_df = context["geometry"]
+            self.amp = context["data"]
+            self._header1_values = np.unique(self.geom_df[header1].to_numpy())
+            self.slider.blockSignals(True)
+            max_idx = len(self._header1_values) - 1 if len(self._header1_values) > 0 else 0
+            self.slider.setMaximum(max_idx)
+            self.slider.setValue(0)
+            self.slider.blockSignals(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Pre-stack Viewer", f"Failed to sort data:\n{exc}")
+            return
+        name = self.current_manifest.stem.replace(".zarr", "").replace(".manifest", "")
+        self.placeholder.setText(
+            f"Loaded dataset: {name}\nHeader1: {header1}, Header2: {header2}\n(Plotting not implemented yet.)"
+        )
+        # Display first slice
+        self.on_slider_changed(0)
+
+    def on_slider_changed(self, idx: int):
+        if getattr(self, "_header1_values", None) is None:
+            return
+        if self.geom_df is None or self.amp is None:
+            return
+        if len(self._header1_values) == 0:
+            return
+        if idx < 0 or idx >= len(self._header1_values):
+            return
+        header1 = self.header1_combo.currentText()
+        header2 = self.header2_combo.currentText()
+        target = self._header1_values[idx]
+        mask = self.geom_df[header1] == target
+        subset = self.geom_df[mask]
+        trace_indices = subset.index.to_numpy()
+        if len(trace_indices) == 0:
+            return
+        try:
+            subset_data = self.amp[:, trace_indices]
+            self._plot_gather(subset_data, subset.copy(), header1, header2, target)
+            self.placeholder.setText(
+                f"Selected {header1}={target} with {len(trace_indices)} traces."
+            )
+            self._current_subset_data = subset_data
+            self._current_subset_df = subset.copy()
+            self._current_header1 = header1
+            self._current_header2 = header2
+            self._current_target = target
+            self._plot_map(subset)
+        except Exception:
+            self.placeholder.setText(
+                f"Selected {header1}={target} with {len(trace_indices)} traces (plot failed)."
+            )
+
+    def _plot_gather(self, data: np.ndarray, geom_df: pd.DataFrame, header1: str, header2: str, target):
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        if header2 not in geom_df.columns:
+            geom_df = geom_df.copy()
+            geom_df["trace_index"] = np.arange(data.shape[1])
+            header2 = "trace_index"
+        context = {"data": data, "geometry": geom_df}
+        # Auto-scale using user-selected percentile to dampen outliers
+        perc = self.perc_spin.value()
+        vmin = vmax = None
+        if perc > 0:
+            clip = float(np.nanpercentile(data, perc))
+            vmin = -clip
+            vmax = clip
+        plot_seismic_image(
+            context,
+            xlabel=header2,
+            ylabel="Time/depth",
+            y_spacing=1.0,
+            x_header=header2,
+            perc=None,
+            cmap="gray_r",
+            vmin=vmin,
+            vmax=vmax,
+            ax=ax,
+            show=False,
+        )
+        ax.set_title(f"{header1} = {target}")
+        self.canvas.draw_idle()
+
+    def _clear_map(self):
+        self.map_fig.clear()
+        self.map_canvas.draw_idle()
+
+    def _find_col(self, df: pd.DataFrame, names: list[str]) -> str | None:
+        for n in names:
+            if n in df.columns:
+                return n
+        lowmap = {c.lower(): c for c in df.columns}
+        for n in names:
+            if n.lower() in lowmap:
+                return lowmap[n.lower()]
+        return None
+
+    def _plot_map(self, subset: pd.DataFrame):
+        self.map_fig.clear()
+        ax = self.map_fig.add_subplot(111)
+        # Survey frontier from project metadata (if available)
+        plotted = False
+        x_min = x_max = y_min = y_max = None
+        if self.boundary and "x_range" in self.boundary and "y_range" in self.boundary:
+            x_min, x_max = self.boundary["x_range"]
+            y_min, y_max = self.boundary["y_range"]
+
+            rect_x = [x_min, x_max, x_max, x_min, x_min]
+            rect_y = [y_min, y_min, y_max, y_max, y_min]
+            ax.plot(rect_x, rect_y, color="green", linewidth=1.5, linestyle="--", label="Survey frontier")
+            plotted = True
+        if subset is None or subset.empty:
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            if plotted:
+                ax.legend(loc="best")
+            ax.grid(True, linestyle="--", alpha=0.3)
+            self.map_canvas.draw_idle()
+            return
+        sx_col = self._find_col(subset, ["SourceX", "sx"])
+        sy_col = self._find_col(subset, ["SourceY", "sy"])
+        gx_col = self._find_col(subset, ["GroupX", "gx"])
+        gy_col = self._find_col(subset, ["GroupY", "gy"])
+        if sx_col and sy_col:
+            ax.scatter(subset[sx_col], subset[sy_col], s=18, c="red", alpha=0.7, marker="*", label="Sources", rasterized=True)
+            plotted = True
+        if gx_col and gy_col:
+            ax.scatter(subset[gx_col], subset[gy_col], s=3, c="blue", alpha=0.6, label="Receivers", rasterized=True)
+            plotted = True
+        if x_min is not None and x_max is not None and y_min is not None and y_max is not None:
+            pad_x = 0.05 * max(1.0, x_max - x_min)
+            pad_y = 0.05 * max(1.0, y_max - y_min)
+            ax.set_xlim(x_min - pad_x, x_max + pad_x)
+            ax.set_ylim(y_min - pad_y, y_max + pad_y)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        if plotted:
+            ax.legend(loc="upper right", bbox_to_anchor=(1.15, 1.0))
+        ax.grid(True, linestyle="--", alpha=0.3)
+        self.map_canvas.draw_idle()
+
+    def apply_global_limits(self):
+        # Deprecated placeholder; kept for compatibility if invoked elsewhere.
+        if self._current_subset_data is None:
+            return
+
+    def on_limits_changed(self):
+        if self._current_subset_data is None or self._current_subset_df is None:
+            return
+        self._plot_gather(
+            self._current_subset_data,
+            self._current_subset_df,
+            self._current_header1 or "",
+            self._current_header2 or "",
+            self._current_target,
+        )
+
+def show_prestack_viewer(window):
+    """Add the pre-stack viewer tab for the current survey."""
+    if not window.currentSurveyPath:
+        QtWidgets.QMessageBox.warning(window, "Warning", "Please select a survey first.")
+        return
+    manifests_all = [p for p in _list_manifests(window.currentSurveyPath) if p.exists()]
+    manifests = [p for p in manifests_all if "post" not in _dataset_type(p)]
+    if not manifests:
+        QtWidgets.QMessageBox.information(window, "Pre-stack Viewer", "No pre-stack datasets found for this survey.")
+        return
+    boundary = None
+    if window.currentSurveyName:
+        try:
+            project = next(p for p in list_projects() if p["name"] == window.currentSurveyName)
+            metadata = project.get("metadata", {}) or {}
+            boundary = metadata.get("boundary", metadata)
+        except Exception:
+            boundary = None
+    widget = PrestackViewer(window, manifests, boundary=boundary)
+    window.tabWidget.addTab(widget, "Pre-stack Viewer")
+    window.tabWidget.setCurrentWidget(widget)

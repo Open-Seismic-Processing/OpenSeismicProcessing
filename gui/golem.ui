@@ -73,7 +73,7 @@
      <addaction name="action_Binary_file"/>
     </widget>
     <addaction name="action_Select_Setup"/>
-    <addaction name="edit_parameters"/>
+    <addaction name="action_Manage"/>
     <addaction name="menu_Import"/>
     <addaction name="menu_Export"/>
     <addaction name="action_Save"/>
@@ -91,6 +91,7 @@
     <addaction name="action_Headers"/>
     <addaction name="action_2D_Viewer"/>
     <addaction name="action_3D_Viewer"/>
+    <addaction name="action_Pre_stack_Viewer"/>
    </widget>
    <widget class="QMenu" name="menu_File">
     <property name="title">
@@ -116,9 +117,9 @@
    <addaction name="menu_About"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
-  <action name="edit_parameters">
+  <action name="action_Manage">
    <property name="text">
-    <string>&amp;Edit Parameters...</string>
+    <string>&amp;Manage...</string>
    </property>
    <property name="font">
     <font>
@@ -207,6 +208,11 @@
   <action name="action_3D_Viewer">
    <property name="text">
     <string>&amp;3D Viewer...</string>
+   </property>
+  </action>
+  <action name="action_Pre_stack_Viewer">
+   <property name="text">
+    <string>&amp;Pre-stack Viewer...</string>
    </property>
   </action>
  </widget>

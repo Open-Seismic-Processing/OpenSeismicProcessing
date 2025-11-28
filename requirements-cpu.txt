@@ -7,3 +7,6 @@ pylops
 numba
 segyio
 ipython
+PyQt6
+pyarrow
+fastparquet

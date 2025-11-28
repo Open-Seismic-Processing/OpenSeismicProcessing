@@ -37,6 +37,9 @@ setup(
         "zarr<3",
         "numcodecs",
         "tqdm",
+        "PyQt6",
+        "pyarrow",
+        "fastparquet",
     ],
     extras_require={
         "gpu": [

@@ -854,10 +854,15 @@ class ImportSEGYDialog(QtWidgets.QDialog):
     def _ensure_output_paths(self) -> tuple[Path, Path]:
         base_dir = self.survey_root
         if base_dir is None or not base_dir.exists():
-            dlg_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output folder for SEG-Y import")
-            if not dlg_dir:
+            dlg = QtWidgets.QFileDialog(self, "Select output folder for SEG-Y import")
+            dlg.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dlg.setOptions(QtWidgets.QFileDialog.Option.DontUseNativeDialog | QtWidgets.QFileDialog.Option.ShowDirsOnly)
+            if not dlg.exec():
                 return None, None
-            base_dir = Path(dlg_dir)
+            sel = dlg.selectedFiles()
+            if not sel:
+                return None, None
+            base_dir = Path(sel[0])
         binaries_dir = base_dir / "Binaries"
         geometry_dir = base_dir / "Geometry"
         binaries_dir.mkdir(parents=True, exist_ok=True)
@@ -1004,6 +1009,25 @@ class ImportSEGYDialog(QtWidgets.QDialog):
         zarr_path, geom_path = self._ensure_output_paths()
         if not zarr_path or not geom_path:
             return False
+        progress = QtWidgets.QProgressDialog("Importing SEG-Y into Zarr...", "Cancel", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.setValue(0)
+        progress_max = {"total": 0}
+        progress.show()
+
+        def progress_cb(processed: int, total: int, current_file: str | None):
+            if total and progress_max["total"] != total:
+                progress.setMaximum(total)
+                progress_max["total"] = total
+            progress.setValue(processed)
+            if current_file:
+                progress.setLabelText(f"Importing {Path(current_file).name} ({processed}/{max(total,1)})")
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                raise RuntimeError("Import cancelled by user")
+
         try:
             if trace_ids is None:
                 coord_scales_func = lambda path, f: self._coord_scale_arrays(f, f.tracecount)
@@ -1019,6 +1043,8 @@ class ImportSEGYDialog(QtWidgets.QDialog):
                     allow_append=False,
                     unit_factor=self._unit_factor(),
                     coord_scales=coord_scales_func,
+                    selected_headers=self._selected_headers_metadata(),
+                    progress_cb=progress_cb,
                 )
             else:
                 if not self._write_subset_to_zarr(trace_ids, zarr_path, geom_path):
@@ -1031,14 +1057,33 @@ class ImportSEGYDialog(QtWidgets.QDialog):
                     "dataset_type": self._dataset_type_slug(),
                     "trace_count": int(len(trace_ids)),
                     "created_at": datetime.utcnow().isoformat() + "Z",
+                    "selected_headers": self._selected_headers_metadata(),
                 }
                 manifest_path = Path(str(zarr_path) + ".manifest.json")
                 manifest_path.write_text(json.dumps(manifest, indent=2))
+        except RuntimeError:
+            progress.close()
+            QtWidgets.QMessageBox.information(self, "Import Cancelled", "SEG-Y import was cancelled by the user.")
+            return False
         except Exception as exc:
+            progress.close()
             QtWidgets.QMessageBox.warning(self, "Import Error", f"Failed to store SEG-Y into Zarr:\n{exc}")
             return False
+        progress.close()
         QtWidgets.QMessageBox.information(self, "SEG-Y Imported", f"Saved traces to:\n{zarr_path}\nGeometry to:\n{geom_path}")
         return True
+
+    def _selected_headers_metadata(self) -> dict:
+        return {
+            "inline_header": getattr(self, "selected_inline_column", None),
+            "xline_header": getattr(self, "selected_xline_column", None),
+            "x_header": getattr(self, "selected_xrange_column", None),
+            "y_header": getattr(self, "selected_yrange_column", None),
+            "inline_scaler_header": self.inlineScaleCombo.currentText() if hasattr(self, "inlineScaleCombo") else None,
+            "xline_scaler_header": self.xlineScaleCombo.currentText() if hasattr(self, "xlineScaleCombo") else None,
+            "x_scaler_header": self.xScaleCombo.currentText() if hasattr(self, "xScaleCombo") else None,
+            "y_scaler_header": self.yScaleCombo.currentText() if hasattr(self, "yScaleCombo") else None,
+        }
 
     def GetAcquisitionType(self):
         return self.comboBoxMode.currentText()
@@ -1296,12 +1341,11 @@ class ImportSEGYDialog(QtWidgets.QDialog):
 
     def ImportSEGYFIle(self):
         self.SEGY_Dataframe = None
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self,
-            "Select SEG-Y Files",
-            "",
-            "SEG-Y Files (*.sgy *.segy)"
-        )
+        dlg = QtWidgets.QFileDialog(self, "Select SEG-Y Files")
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFiles)
+        dlg.setNameFilter("SEG-Y Files (*.sgy *.segy)")
+        dlg.setOptions(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+        paths = dlg.selectedFiles() if dlg.exec() else []
 
         if not paths:
             return

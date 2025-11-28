@@ -10,7 +10,6 @@ import segyio
 import segyio.tools
 import zarr
 from numcodecs import Blosc
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
 import json
@@ -183,6 +182,8 @@ def segy_directory_to_zarr(
     coord_scales: Union[Dict[str, float], Callable[[Path, Any], Dict[str, float]], None] = None,
     allow_append: bool = True,
     header_spec: Dict[str, Tuple[int, int]] | None = None,
+    selected_headers: Dict[str, Any] | None = None,
+    progress_cb: Callable[[int, int, str | None], None] | None = None,
 ) -> str:
     """Convert SEG-Y files into a Zarr store + geometry table using header_spec names."""
 
@@ -191,6 +192,15 @@ def segy_directory_to_zarr(
         headers = tuple(header_spec.keys())
 
     files = _resolve_segy_inputs(segy_input)
+
+    total_traces = 0
+    if progress_cb is not None:
+        for fpath in files:
+            try:
+                with segyio.open(fpath, "r", ignore_geometry=True) as f:
+                    total_traces += len(f.trace)
+            except Exception:
+                continue
 
     # Canonical header-name mapping for scaling
     lower_to_original = {header.lower(): header for header in headers}
@@ -224,6 +234,7 @@ def segy_directory_to_zarr(
             "dataset_id": dataset_id,
             "created_at": datetime.utcnow().isoformat() + "Z",
             "dataset_type": dataset_type or "",
+            "selected_headers": selected_headers or {},
         }
     )
 
@@ -292,7 +303,14 @@ def segy_directory_to_zarr(
         arr[neg] = 1.0 / np.abs(v[neg])
         return arr
 
-    for file_id, file_path in enumerate(tqdm(files, desc="Streaming SEGY files")):
+    # initial progress update
+    if progress_cb is not None:
+        try:
+            progress_cb(0, int(total_traces), None)
+        except Exception:
+            pass
+
+    for file_id, file_path in enumerate(files):
         file_path = Path(file_path)
         try:
             f = segyio.open(file_path, "r", ignore_geometry=False)
@@ -384,6 +402,11 @@ def segy_directory_to_zarr(
 
         offset = idx_end
         file_metadata.append(entry)
+        if progress_cb is not None:
+            try:
+                progress_cb(int(offset), int(total_traces), str(file_path))
+            except Exception:
+                pass
 
     if arrow_writer is not None:
         arrow_writer.close()
@@ -414,6 +437,7 @@ def segy_directory_to_zarr(
         "created_at": datetime.utcnow().isoformat() + "Z",
         "source_inputs": [str(f) for f in files],
         "dataset_type": dataset_type or "",
+        "selected_headers": selected_headers or {},
     }
     manifest_path = Path(str(zarr_out) + ".manifest.json")
     manifest_path.write_text(json.dumps(_json_safe(manifest), indent=2))
